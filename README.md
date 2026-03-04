@@ -15,17 +15,16 @@ A parameter tuning utility designed for the **hysteria2 client**. Given a speed 
 ## Directory Structure
 
 - `src/tuner.rs`
-- Download/ensure hysteria2 binary.
-- Patch configurations and restart client.
-- Speed test/latency test and binary search logic.
-
+  - Download/ensure hysteria2 binary.
+  - Patch configurations and restart client.
+  - Speed test/latency test and binary search logic.
 - `src/ui/`
-- `main.rs`: TUI main loop.
-- `app.rs`: Application state and event handling.
-- `layout.rs`: UI layout and rendering.
-- `input.rs`: Input editing and parameter adjustment.
-- `style.rs`: Log color schemes.
-- `types.rs`: UI type definitions.
+  - `main.rs`: TUI main loop.
+  - `app.rs`: Application state and event handling.
+  - `layout.rs`: UI layout and rendering.
+  - `input.rs`: Input editing and parameter adjustment.
+  - `style.rs`: Log color schemes.
+  - `types.rs`: UI type definitions.
 
 ## Configuration
 

@@ -46,7 +46,7 @@
 
 ## 使用方式
 
-首先原地拷贝 `hy/config.yaml.template` 为 `hy/config.yaml`，并填写其中的 `server`、`auth`。`bandwidth` 字段不需要修改，程序会自动调整。
+首先原地拷贝 `hy/config.yaml.template` 为 `hy/config.yaml`，并填写其中的 `server`、`auth`。`bandwidth` 字段**不需要**手动修改，程序会自动调整。
 
 启动程序后，你可以在界面内完成所有操作：
 
