@@ -1,0 +1,13 @@
+server: <SERVER_ADDR>:<PORT>
+
+auth: "<AUTH_TOKEN>"
+
+bandwidth:
+  up: 30 Mbps
+  down: 200 Mbps
+
+socks5:
+  listen: 127.0.0.1:1080
+
+http:
+  listen: 127.0.0.1:8080
