@@ -2,6 +2,9 @@ server: <SERVER_ADDR>:<PORT>
 
 auth: "<AUTH_TOKEN>"
 
+tls:
+  insecure: true
+
 bandwidth:
   up: 30 Mbps
   down: 200 Mbps
