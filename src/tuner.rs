@@ -119,7 +119,7 @@ pub fn measure_speed_upload(cfg: &Tunable) -> Result<f64> {
 
     // 创建子进程管道：dd -> curl
     let dd_process = Command::new("dd")
-        .args(["if=/dev/zero", "bs=1M", "count=5", "status=none"])  // status=none 禁用进度输出
+        .args(["if=/dev/zero", "bs=1M", "count=5", "status=none"]) // status=none 禁用进度输出
         .stdout(Stdio::piped())
         .spawn()
         .context("启动 dd 失败")?;
@@ -152,7 +152,10 @@ pub fn measure_speed_upload(cfg: &Tunable) -> Result<f64> {
     }
 
     let s = String::from_utf8_lossy(&curl_output.stdout);
-    let bps: f64 = s.trim().parse().unwrap_or(0.0);
+    let bps: f64 = s
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("无效的上行速度值: {}", s.trim()))?;
     Ok(bps * 8.0 / 1024.0 / 1024.0)
 }
 
@@ -355,7 +358,7 @@ pub fn optimal_bandwidth_search(
     // === 第二步：智能收缩搜索区间 ===
     // 原始区间可能是 [50, 2000]，现在缩小到 [baseline/2, baseline*1.5]
     let search_min = (min_val).max(baseline / 2);
-    let search_max = (max_val).min(baseline * 3 / 2);
+    let search_max = (max_val).min((baseline as u64 * 3 / 2) as u32); // 防止 u32 溢出
 
     // 防止区间过小或异常
     let search_min = search_min.max(min_val);
