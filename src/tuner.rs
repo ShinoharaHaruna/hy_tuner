@@ -11,6 +11,26 @@ use reqwest::blocking::Client;
 
 use crate::config::Tunable;
 
+// 枚举类型，增强类型安全
+#[derive(Clone, Copy, Debug)]
+pub enum Direction {
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SearchPhase {
+    Coarse,
+    Fine,
+}
+
+// 评分算法常量
+const LATENCY_THRESHOLD_MS: f64 = 100.0; // 延迟惩罚阈值
+const LATENCY_DECAY_MS: f64 = 50.0; // 延迟衰减斜率
+const JITTER_CV_THRESHOLD: f64 = 0.2; // 抖动变异系数阈值
+const JITTER_DECAY: f64 = 0.1; // 抖动衰减斜率
+const BANDWIDTH_PREFERENCE_WEIGHT: f64 = 0.3; // 带宽偏好权重
+
 pub fn ensure_binary(cfg: &Tunable, log_tx: &Sender<String>) -> Result<()> {
     if cfg.hy_binary.exists() {
         log_tx.send("Hysteria2 二进制已存在，跳过下载".into()).ok();
@@ -160,30 +180,25 @@ pub fn measure_speed_upload(cfg: &Tunable) -> Result<f64> {
 }
 
 // 多次测量取平均值，同时测量延迟和抖动
-// direction: "up" 测上行速度, "down" 测下行速度
-// 返回：(速度, 延迟, 速度标准差)
 pub fn measure_comprehensive(
     cfg: &Tunable,
     socks_port: u16,
-    _log_tx: &Sender<String>,
-    phase: &str,
-    direction: &str,
+    log_tx: &Sender<String>,
+    phase: SearchPhase,
+    direction: Direction,
 ) -> Result<(f64, f64, f64)> {
-    let (samples, interval) = if phase == "coarse" {
-        (2, 500)
-    } else {
-        (3, 600)
+    let (samples, interval) = match phase {
+        SearchPhase::Coarse => (2, 500),
+        SearchPhase::Fine => (3, 600),
     };
 
     let mut speeds = Vec::with_capacity(samples);
     let mut latencies = Vec::with_capacity(samples);
 
     for i in 0..samples {
-        // 根据方向选择测速方法
-        let speed = if direction == "up" {
-            measure_speed_upload(cfg)?
-        } else {
-            measure_speed(cfg)?
+        let speed = match direction {
+            Direction::Up => measure_speed_upload(cfg)?,
+            Direction::Down => measure_speed(cfg)?,
         };
 
         let latency = measure_latency(cfg, socks_port).unwrap_or(0.0);
@@ -200,6 +215,25 @@ pub fn measure_comprehensive(
     let speed_std =
         (speeds.iter().map(|&s| (s - avg_speed).powi(2)).sum::<f64>() / samples as f64).sqrt();
 
+    // 输出测量结果
+    let label = match direction {
+        Direction::Up => "上行",
+        Direction::Down => "下行",
+    };
+    log_tx
+        .send(format!(
+            "{}{}: {:.1} Mbps, {:.0} ms",
+            if matches!(phase, SearchPhase::Coarse) {
+                "  "
+            } else {
+                "    "
+            },
+            label,
+            avg_speed,
+            avg_latency
+        ))
+        .ok();
+
     Ok((avg_speed, avg_latency, speed_std))
 }
 
@@ -213,23 +247,24 @@ fn calculate_score(
     max_bandwidth: u32,
     log_tx: &Sender<String>,
 ) -> f64 {
-    // 延迟惩罚：延迟超过100ms开始惩罚，指数增长
-    let latency_penalty = if latency > 100.0 {
-        1.0 + ((latency - 100.0) / 50.0).powf(2.0)
+    // 延迟惩罚：延迟超过阈值开始惩罚，指数增长
+    let latency_penalty = if latency > LATENCY_THRESHOLD_MS {
+        1.0 + ((latency - LATENCY_THRESHOLD_MS) / LATENCY_DECAY_MS).powf(2.0)
     } else {
         1.0
     };
 
-    // 抖动惩罚：速度变异系数(CV)超过0.2开始惩罚
+    // 抖动惩罚：速度变异系数(CV)超过阈值开始惩罚
     let cv = if speed > 0.0 { speed_std / speed } else { 1.0 };
-    let jitter_penalty = if cv > 0.2 {
-        1.0 + ((cv - 0.2) / 0.1).powf(2.0)
+    let jitter_penalty = if cv > JITTER_CV_THRESHOLD {
+        1.0 + ((cv - JITTER_CV_THRESHOLD) / JITTER_DECAY).powf(2.0)
     } else {
         1.0
     };
 
     // 带宽偏好：偏向较低带宽（避免过度配置）
-    let bandwidth_preference = 1.0 + (bandwidth as f64 / max_bandwidth as f64) * 0.3;
+    let bandwidth_preference =
+        1.0 + (bandwidth as f64 / max_bandwidth as f64) * BANDWIDTH_PREFERENCE_WEIGHT;
 
     // 综合评分：速度 / (延迟惩罚 × 抖动惩罚 × 带宽偏好)
     let score = speed / (latency_penalty * jitter_penalty * bandwidth_preference);
@@ -318,18 +353,17 @@ pub fn measure_baseline_bandwidth(cfg: &Tunable, log_tx: &Sender<String>) -> Res
     Ok(baseline)
 }
 
-pub fn patch_bandwidth(cfg: &Tunable, param: &str, val: u32) -> Result<()> {
+pub fn patch_bandwidth(cfg: &Tunable, param: Direction, val: u32) -> Result<()> {
     let content = fs::read_to_string(&cfg.hy_config)?;
-    let replaced = if param == "up" {
-        Regex::new(r"(?m)^\s*up:\s*.*$")
+    let replaced = match param {
+        Direction::Up => Regex::new(r"(?m)^\s*up:\s*.*$")
             .unwrap()
             .replace(&content, format!("  up: {} Mbps", val))
-            .to_string()
-    } else {
-        Regex::new(r"(?m)^\s*down:\s*.*$")
+            .to_string(),
+        Direction::Down => Regex::new(r"(?m)^\s*down:\s*.*$")
             .unwrap()
             .replace(&content, format!("  down: {} Mbps", val))
-            .to_string()
+            .to_string(),
     };
     fs::write(&cfg.hy_config, replaced)?;
     Ok(())
@@ -343,7 +377,7 @@ pub fn patch_bandwidth(cfg: &Tunable, param: &str, val: u32) -> Result<()> {
 // 3. 在缩小的区间内精确搜索
 pub fn optimal_bandwidth_search(
     cfg: &Tunable,
-    param: &str,
+    param: Direction,
     min_val: u32,
     max_val: u32,
     target_accuracy: u32,
@@ -367,8 +401,16 @@ pub fn optimal_bandwidth_search(
     log_tx
         .send(format!(
             "[{}] {} 调优",
-            param,
-            if param == "up" { "上行" } else { "下行" }
+            if matches!(param, Direction::Up) {
+                "up"
+            } else {
+                "down"
+            },
+            if matches!(param, Direction::Up) {
+                "上行"
+            } else {
+                "下行"
+            }
         ))
         .ok();
     log_tx
@@ -411,7 +453,8 @@ pub fn optimal_bandwidth_search(
         .ok();
     patch_bandwidth(cfg, param, x1 as u32)?;
     restart_hysteria(cfg, log_tx)?;
-    let (s1, l1, std1) = measure_comprehensive(cfg, socks_port, log_tx, "coarse", param)?;
+    let (s1, l1, std1) =
+        measure_comprehensive(cfg, socks_port, log_tx, SearchPhase::Coarse, param)?;
     let mut score1 = calculate_score(x1 as u32, s1, l1, std1, search_max, log_tx);
 
     // 测试 x2
@@ -420,7 +463,8 @@ pub fn optimal_bandwidth_search(
         .ok();
     patch_bandwidth(cfg, param, x2 as u32)?;
     restart_hysteria(cfg, log_tx)?;
-    let (s2, l2, std2) = measure_comprehensive(cfg, socks_port, log_tx, "coarse", param)?;
+    let (s2, l2, std2) =
+        measure_comprehensive(cfg, socks_port, log_tx, SearchPhase::Coarse, param)?;
     let mut score2 = calculate_score(x2 as u32, s2, l2, std2, search_max, log_tx);
 
     let mut best_x = if score1 > score2 { x1 } else { x2 };
@@ -469,7 +513,8 @@ pub fn optimal_bandwidth_search(
 
                 patch_bandwidth(cfg, param, x1 as u32)?;
                 restart_hysteria(cfg, log_tx)?;
-                let (s, l, std) = measure_comprehensive(cfg, socks_port, log_tx, "coarse", param)?;
+                let (s, l, std) =
+                    measure_comprehensive(cfg, socks_port, log_tx, SearchPhase::Coarse, param)?;
                 score1 = calculate_score(x1 as u32, s, l, std, search_max, log_tx);
 
                 if score1 > best_score {
@@ -504,7 +549,8 @@ pub fn optimal_bandwidth_search(
 
                 patch_bandwidth(cfg, param, x2 as u32)?;
                 restart_hysteria(cfg, log_tx)?;
-                let (s, l, std) = measure_comprehensive(cfg, socks_port, log_tx, "coarse", param)?;
+                let (s, l, std) =
+                    measure_comprehensive(cfg, socks_port, log_tx, SearchPhase::Coarse, param)?;
                 score2 = calculate_score(x2 as u32, s, l, std, search_max, log_tx);
 
                 if score2 > best_score {
@@ -522,8 +568,13 @@ pub fn optimal_bandwidth_search(
 
     let best_bw = best_x.round() as u32;
 
+    let param_label = if matches!(param, Direction::Up) {
+        "up"
+    } else {
+        "down"
+    };
     log_tx
-        .send(format!("{} 优化完成: {} Mbps", param, best_bw))
+        .send(format!("[{}] 优化完成: {} Mbps", param_label, best_bw))
         .ok();
     log_tx
         .send(format!(
@@ -536,7 +587,7 @@ pub fn optimal_bandwidth_search(
     patch_bandwidth(cfg, param, best_bw)?;
     restart_hysteria(cfg, log_tx)?;
     let (final_speed, final_latency, _) =
-        measure_comprehensive(cfg, socks_port, log_tx, "fine", param)?;
+        measure_comprehensive(cfg, socks_port, log_tx, SearchPhase::Fine, param)?;
 
     log_tx
         .send(format!(
@@ -554,10 +605,10 @@ pub fn run_tuning(cfg: Tunable, log_tx: Sender<String>) {
         let socks = parse_socks_port(&cfg.hy_config)?;
 
         log_tx.send("开始第一阶段（固定下行优化上行）".into()).ok();
-        patch_bandwidth(&cfg, "down", cfg.min_down)?;
+        patch_bandwidth(&cfg, Direction::Down, cfg.min_down)?;
         let (best_up, _) = optimal_bandwidth_search(
             &cfg,
-            "up",
+            Direction::Up,
             cfg.min_up,
             cfg.max_up,
             cfg.target_accuracy,
@@ -566,10 +617,10 @@ pub fn run_tuning(cfg: Tunable, log_tx: Sender<String>) {
         )?;
 
         log_tx.send("开始第二阶段（固定上行优化下行）".into()).ok();
-        patch_bandwidth(&cfg, "up", best_up)?;
+        patch_bandwidth(&cfg, Direction::Up, best_up)?;
         let (best_down, _) = optimal_bandwidth_search(
             &cfg,
-            "down",
+            Direction::Down,
             cfg.min_down,
             cfg.max_down,
             cfg.target_accuracy,
@@ -586,7 +637,7 @@ pub fn run_tuning(cfg: Tunable, log_tx: Sender<String>) {
 
         restart_hysteria(&cfg, &log_tx)?;
         let (final_speed, final_latency, _) =
-            measure_comprehensive(&cfg, socks, &log_tx, "fine", "down")?;
+            measure_comprehensive(&cfg, socks, &log_tx, SearchPhase::Fine, Direction::Down)?;
         let latency = final_latency; // 使用测量的延迟
         log_tx.send("===== 调优完成 =====".into()).ok();
         log_tx
